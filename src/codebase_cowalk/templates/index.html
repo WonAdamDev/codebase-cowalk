@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ state.session.slug }} — codebase-cowalk</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if css_inline %}
+<style>{{ css_inline | safe }}</style>
+{% else %}
+<link rel="stylesheet" href="/static/app.css">
+{% endif %}
+</head>
+<body class="{% if read_only %}read-only{% endif %}">
+
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="brand">codebase-cowalk</span>
+    <span class="slug" title="session slug">{{ state.session.slug }}</span>
+    {% if state.session.diff_mode %}<span class="badge diff">DIFF</span>{% endif %}
+    {% if read_only %}<span class="badge readonly">READ-ONLY</span>{% endif %}
+  </div>
+  <div class="topbar-right">
+    <div class="progress">
+      <span class="progress-label">analysis</span>
+      <div class="progress-bar"><div class="progress-fill" id="bar-analyzed"></div></div>
+      <span id="lbl-analyzed">{{ state.progress.analyzed }}/{{ state.progress.total }}</span>
+    </div>
+    <div class="progress">
+      <span class="progress-label">review</span>
+      <div class="progress-bar"><div class="progress-fill" id="bar-reviewed"></div></div>
+      <span id="lbl-reviewed">{{ state.progress.reviewed }}/{{ state.progress.total }}</span>
+    </div>
+    <button id="theme-toggle" title="Toggle theme">⏾</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="left" id="left-pane">
+    <div class="filter-row">
+      <input id="filter-input" type="text" placeholder="filter by file or symbol…">
+      <select id="filter-status">
+        <option value="">all</option>
+        <option value="ok">✓ ok</option>
+        <option value="suspicious">🚩 suspicious</option>
+        <option value="unknown">❓ unknown</option>
+        <option value="unreviewed">unreviewed</option>
+        <option value="diff">changed</option>
+      </select>
+    </div>
+    <div id="tree" class="tree"></div>
+  </aside>
+
+  <section class="center" id="center-pane">
+    <div class="chunk-header" id="chunk-header">
+      <h2 id="chunk-title">Select a chunk on the left</h2>
+      <div class="chunk-meta" id="chunk-meta"></div>
+    </div>
+    <pre class="code" id="chunk-code"><code></code></pre>
+  </section>
+
+  <aside class="right" id="right-pane">
+    <div class="chunk-actions" id="chunk-actions">
+      <div class="status-toggle">
+        <button class="status-btn" data-status="ok" title="Reviewed and OK">✓</button>
+        <button class="status-btn" data-status="suspicious" title="Looks suspicious">🚩</button>
+        <button class="status-btn" data-status="unknown" title="Unsure">❓</button>
+        <button class="status-btn" data-status="" title="Clear status">×</button>
+      </div>
+      <button id="btn-rerequest" class="action-btn" title="Ask Claude to re-explain this chunk">re-explain</button>
+    </div>
+    <div id="blocks" class="blocks"></div>
+    <div class="comment-area">
+      <textarea id="comment-input" placeholder="add a freeform comment for the reviewer record…"></textarea>
+      <button id="btn-comment" class="action-btn">save comment</button>
+    </div>
+    <div id="comments" class="comments"></div>
+  </aside>
+</main>
+
+<script id="initial-state" type="application/json">{{ state_json | safe }}</script>
+<script>window.__COWALK_LIVE__ = {{ 'true' if is_live and not read_only else 'false' }};</script>
+<script>window.__COWALK_READ_ONLY__ = {{ 'true' if read_only else 'false' }};</script>
+
+{% if js_inline %}
+<script>{{ js_inline | safe }}</script>
+{% else %}
+<script src="/static/app.js"></script>
+{% endif %}
+
+</body>
+</html>

@@ -1,0 +1,8 @@
+[
+  {
+    "name": "codewalk-events",
+    "command": "uvx --from ${CLAUDE_PLUGIN_ROOT} codebase-cowalk-tail",
+    "description": "User reactions in codewalk HTML pages (rerequest, comments, status changes)",
+    "when": "on-skill-invoke:walk-codebase"
+  }
+]

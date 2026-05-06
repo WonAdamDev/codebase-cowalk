@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
+  "name": "cowalk-marketplace",
+  "description": "Single-plugin marketplace for codebase-cowalk: chunk-by-chunk codebase walkthroughs in the browser, driven by Claude Code.",
+  "owner": {
+    "name": "WonAdamDev",
+    "email": "ehdgu5500@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "codebase-cowalk",
+      "source": "./",
+      "description": "Walk through a codebase chunk by chunk in your browser. Claude pushes interactive explanations to a live HTML page so a human can review LLM-generated code without re-reading every line.",
+      "homepage": "https://github.com/WonAdamDev/codebase-cowalk",
+      "repository": "https://github.com/WonAdamDev/codebase-cowalk",
+      "license": "MIT",
+      "category": "code-review",
+      "keywords": [
+        "code-review",
+        "codebase-walkthrough",
+        "llm-code-review",
+        "chunk-explanation",
+        "html-viewer",
+        "tree-sitter",
+        "mcp-server"
+      ]
+    }
+  ]
+}

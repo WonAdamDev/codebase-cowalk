@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "codebase-cowalk": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "codebase-cowalk-mcp"
+      ],
+      "env": {
+        "CODEBASE_COWALK_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}

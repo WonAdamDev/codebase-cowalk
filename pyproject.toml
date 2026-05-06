@@ -1,0 +1,53 @@
+[project]
+name = "codebase-cowalk"
+version = "0.1.0"
+description = "MCP server + Claude Code plugin for chunk-by-chunk codebase walkthroughs in the browser"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "WonAdamDev" }]
+keywords = [
+  "claude-code",
+  "mcp",
+  "code-review",
+  "tree-sitter",
+  "llm-review",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+  "mcp>=1.2.0",
+  "tree-sitter>=0.23.0",
+  "tree-sitter-language-pack>=0.7.0",
+  "jinja2>=3.1.4",
+  "pygments>=2.18.0",
+  "aiohttp>=3.10.0",
+  "markdown-it-py>=3.0.0",
+]
+
+[project.scripts]
+codebase-cowalk-mcp = "codebase_cowalk.__main__:main"
+codebase-cowalk-tail = "codebase_cowalk.tail:main"
+
+[project.urls]
+Homepage = "https://github.com/WonAdamDev/codebase-cowalk"
+Repository = "https://github.com/WonAdamDev/codebase-cowalk"
+Issues = "https://github.com/WonAdamDev/codebase-cowalk/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codebase_cowalk"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/codebase_cowalk/templates" = "codebase_cowalk/templates"
+"src/codebase_cowalk/static" = "codebase_cowalk/static"

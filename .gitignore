@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# uv
+.uv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local plugin data (development only — usually lives in CLAUDE_PLUGIN_DATA)
+.codewalk/
+out/
+*.cwlk
