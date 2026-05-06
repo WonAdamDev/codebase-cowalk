@@ -14,7 +14,12 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .chunker import ChunkSpec, chunk_files, hash_code, split_chunk_by_ranges
-from .export import cleanup_view, export_session as do_export, open_export as do_open_export
+from .export import (
+    cleanup_view,
+    export_session as do_export,
+    import_export as do_import_export,
+    open_export as do_open_export,
+)
 from .http_server import HttpServer
 from .session import (
     ScopeEntry,
@@ -437,6 +442,37 @@ def open_export(path: str) -> dict[str, Any]:
         "slug": info["slug"],
         "port": port,
         "url": f"http://localhost:{port}",
+    }
+
+
+@mcp.tool()
+def import_codewalk(path: str) -> dict[str, Any]:
+    """Import a `.cwlk` archive into a new editable session and start its HTTP
+    server.
+
+    Use this when you want to take someone else's exported codewalk and run
+    your own independent review on top of it: their explanation blocks are
+    preserved (no need to wait for re-analysis), but review status and comments
+    start fresh under your name.
+
+    For purely viewing someone else's review (no editing), use `open_export`.
+    """
+    info = do_import_export(path)
+    session_id = info["session_id"]
+    store = SessionStore(session_id)
+    if session_id in _servers:
+        _servers[session_id].stop()
+    port = find_free_port()
+    srv = HttpServer(store, port=port)
+    srv.start()
+    _servers[session_id] = srv
+    return {
+        "session_id": session_id,
+        "slug": info["slug"],
+        "original_slug": info["original_slug"],
+        "port": port,
+        "url": f"http://localhost:{port}",
+        "chunk_count": len(store.list_chunks()),
     }
 
 

@@ -1,7 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "codebase-cowalk",
-  "version": "0.1.0",
   "description": "Walk through a codebase chunk by chunk in your browser. Claude analyzes each chunk and pushes interactive explanations to a live HTML page so a human can review LLM-generated code without re-reading every line.",
   "author": {
     "name": "WonAdamDev",

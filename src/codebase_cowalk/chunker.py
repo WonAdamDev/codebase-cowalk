@@ -109,6 +109,20 @@ CHUNK_NODE_TYPES: dict[str, set[str]] = {
 NAME_FIELDS = ("name", "declarator")
 
 
+# A chunk longer than this is auto-subdivided at top-level statement groups
+# inside its body, so a 400-line god-function gets reviewable parts even
+# without the LLM calling split_chunk. Set to 0 to disable.
+LONG_CHUNK_LINES = 200
+
+# When subdividing, target this many lines per sub-chunk.
+SUBDIVIDE_TARGET_LINES = 80
+
+# Body field names per language. Tree-sitter grammars expose the function/class
+# body via different field names; for the languages we list, "body" works for
+# most of them, but a couple of grammars use a different name.
+BODY_FIELDS = ("body", "block", "compound_statement", "declaration_list")
+
+
 @dataclass
 class ChunkSpec:
     """A pre-store representation of a chunk."""
@@ -156,6 +170,158 @@ def _node_name(node, source: bytes) -> str | None:
         if c.type in {"identifier", "type_identifier", "field_identifier"}:
             return _node_text(c, source)
     return None
+
+
+def _find_body_node(node):
+    """Find the first child of `node` that looks like a body (block/compound)."""
+    for f in BODY_FIELDS:
+        try:
+            child = node.child_by_field_name(f)
+        except Exception:
+            child = None
+        if child is not None:
+            return child
+    # generic fallback: first child whose type name contains "block" or "body"
+    for c in node.children:
+        if "block" in c.type or "body" in c.type or c.type == "compound_statement":
+            return c
+    return None
+
+
+def _maybe_subdivide_long_chunk(spec: "ChunkSpec", parser, base_seq: int) -> list["ChunkSpec"]:
+    """If a chunk exceeds LONG_CHUNK_LINES, try to break its body into
+    statement-sized sub-chunks. The parent is replaced wholesale by the children
+    (they fully cover the parent's source). Sub-chunks are returned as a list
+    starting at sequence number `base_seq`. If no useful split is found, returns
+    [spec] with its original sequence.
+
+    Sub-chunks do not set parent_id (the auto-split is invisible in the UI tree;
+    LLM-driven split_chunk is what creates a parent/child relationship).
+    """
+    if LONG_CHUNK_LINES <= 0:
+        return [spec]
+    line_count = spec.line_end - spec.line_start + 1
+    if line_count <= LONG_CHUNK_LINES:
+        return [spec]
+    if parser is None:
+        return [spec]
+
+    try:
+        src = spec.code.encode("utf-8", errors="replace")
+        tree = parser.parse(src)
+        root = tree.root_node
+    except Exception:
+        return [spec]
+
+    # find the outermost named definition node (function/class) inside the chunk
+    def_node = None
+    chunk_types = CHUNK_NODE_TYPES.get(spec.language or "", set())
+    for c in root.children:
+        if c.type in chunk_types:
+            def_node = c
+            break
+    if def_node is None:
+        def_node = root
+
+    body = _find_body_node(def_node)
+    if body is None:
+        return [spec]
+
+    statements = [c for c in body.children if c.is_named and c.type not in {"comment"}]
+    if len(statements) < 2:
+        return [spec]
+
+    target = max(40, SUBDIVIDE_TARGET_LINES)
+    groups: list[list] = []
+    current: list = []
+    current_lines = 0
+    for st in statements:
+        st_lines = st.end_point[0] - st.start_point[0] + 1
+        if current and current_lines + st_lines > target:
+            groups.append(current)
+            current = [st]
+            current_lines = st_lines
+        else:
+            current.append(st)
+            current_lines += st_lines
+    if current:
+        groups.append(current)
+
+    if len(groups) < 2:
+        return [spec]
+
+    parent_lines = spec.code.splitlines(keepends=True)
+    base_symbol = spec.symbol_path or ""
+    body_local_start = body.start_point[0]
+    body_local_end = body.end_point[0]
+    out: list[ChunkSpec] = []
+    seq = base_seq
+
+    # 1) leading prelude (signature + decorators + before-body lines)
+    if body_local_start > 0:
+        prelude = "".join(parent_lines[: body_local_start])
+        if prelude.strip():
+            out.append(
+                ChunkSpec(
+                    chunk_id=f"c-{seq:04d}",
+                    file_path=spec.file_path,
+                    symbol_path=f"{base_symbol} (prelude)" if base_symbol else None,
+                    language=spec.language,
+                    line_start=spec.line_start,
+                    line_end=spec.line_start + body_local_start - 1,
+                    code=prelude,
+                    code_hash=hash_code(prelude),
+                    sequence=seq,
+                )
+            )
+            seq += 1
+
+    # 2) statement groups
+    for i, group in enumerate(groups, start=1):
+        first_stmt = group[0]
+        last_stmt = group[-1]
+        local_start = first_stmt.start_point[0]
+        local_end = last_stmt.end_point[0]
+        snippet = "".join(parent_lines[local_start : local_end + 1])
+        if not snippet.strip():
+            continue
+        out.append(
+            ChunkSpec(
+                chunk_id=f"c-{seq:04d}",
+                file_path=spec.file_path,
+                symbol_path=f"{base_symbol} #{i}" if base_symbol else f"part {i}",
+                language=spec.language,
+                line_start=spec.line_start + local_start,
+                line_end=spec.line_start + local_end,
+                code=snippet,
+                code_hash=hash_code(snippet),
+                sequence=seq,
+            )
+        )
+        seq += 1
+
+    # 3) trailing close-brace / postlude (e.g. `}` of class)
+    if body_local_end < len(parent_lines) - 1:
+        postlude = "".join(parent_lines[body_local_end + 1 :])
+        if postlude.strip():
+            out.append(
+                ChunkSpec(
+                    chunk_id=f"c-{seq:04d}",
+                    file_path=spec.file_path,
+                    symbol_path=f"{base_symbol} (closing)" if base_symbol else None,
+                    language=spec.language,
+                    line_start=spec.line_start + body_local_end + 1,
+                    line_end=spec.line_end,
+                    code=postlude,
+                    code_hash=hash_code(postlude),
+                    sequence=seq,
+                )
+            )
+            seq += 1
+
+    if len(out) < 2:
+        return [spec]
+    return out
 
 
 def _walk_top_level(root, types: set[str]):
@@ -232,32 +398,27 @@ def chunk_file(path: Path, sequence_start: int = 0, code_override: str | None = 
 
     def emit(start_byte: int, end_byte: int, start_line: int, end_line: int, symbol: str | None) -> None:
         nonlocal seq
-        # convert byte slice back to text — but we want full lines at the boundaries.
-        # Snap start to start of its line, end to end of its line.
         if start_byte >= end_byte:
             return
-        line_start_idx = start_line  # already a line start
+        line_start_idx = start_line
         line_end_idx = end_line
-        # ensure we capture the full final line
-        if line_end_idx < len(lines) - 1 and lines[line_end_idx] and not lines[line_end_idx].endswith("\n"):
-            pass
         snippet = "".join(lines[line_start_idx : line_end_idx + 1])
         if not snippet.strip():
             return
-        chunks.append(
-            ChunkSpec(
-                chunk_id=make_id(seq),
-                file_path=str(path),
-                symbol_path=symbol,
-                language=language,
-                line_start=line_start_idx + 1,
-                line_end=line_end_idx + 1,
-                code=snippet,
-                code_hash=hash_code(snippet),
-                sequence=seq,
-            )
+        spec = ChunkSpec(
+            chunk_id=make_id(seq),
+            file_path=str(path),
+            symbol_path=symbol,
+            language=language,
+            line_start=line_start_idx + 1,
+            line_end=line_end_idx + 1,
+            code=snippet,
+            code_hash=hash_code(snippet),
+            sequence=seq,
         )
-        seq += 1
+        produced = _maybe_subdivide_long_chunk(spec, parser, base_seq=seq)
+        chunks.extend(produced)
+        seq += len(produced)
 
     for node in nodes:
         node_start_line = node.start_point[0]

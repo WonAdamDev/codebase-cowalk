@@ -171,6 +171,18 @@ A read-only HTTP server starts on a free port. Status toggles, the comment
 input, and the re-explain button are all hidden. The original reviewer's
 marks and notes are visible exactly as they made them.
 
+### Reviewing on top of someone else's `.cwlk`
+
+If you want to do your own review of the same code (with the same explanation
+blocks pre-populated, but with your own status marks), tell `walk-codebase`:
+
+```
+/codebase-cowalk:walk-codebase verify what Alice walked through in alice-spawn-refactor.cwlk
+```
+
+Claude will call `import_codewalk` under the hood. Original chunks and blocks
+are preserved; review state and comments start fresh.
+
 ### Resuming and managing past sessions
 
 Inside any walk-codebase invocation Claude can call `mcp__codebase-cowalk__list_sessions`

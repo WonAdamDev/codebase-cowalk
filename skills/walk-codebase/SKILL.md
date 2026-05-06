@@ -130,6 +130,10 @@ When the user says they're done (or you've finished the entire scope and there a
 
 If the user invokes this skill with `resume <slug>`, call `start_session(resume=<slug>)` instead of creating a new one. The HTTP server will be re-launched on a fresh port and the existing chunks/blocks/states will be served.
 
+## Import mode
+
+If the user wants to do their own review on top of a `.cwlk` archive someone shared (e.g. "I want to verify what Alice walked through"), call `mcp__codebase-cowalk__import_codewalk(path=<.cwlk path>)` instead of starting from scratch. The original chunks and explanation blocks come along; review state and comments start fresh so the new reviewer's marks aren't conflated with the original author's. For a purely passive read of someone else's review, use `/codebase-cowalk:view-codewalk` instead — that's read-only.
+
 ## Things to NOT do
 
 - Don't render explanations directly in chat. The whole point is the HTML page. Tell the user the URL and push to the page.
