@@ -1,6 +1,6 @@
 [project]
 name = "codebase-cowalk"
-version = "0.1.0"
+version = "0.3.1"
 description = "MCP server + Claude Code plugin for chunk-by-chunk codebase walkthroughs in the browser"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,8 +24,11 @@ classifiers = [
 
 dependencies = [
   "mcp>=1.2.0",
-  "tree-sitter>=0.23.0",
-  "tree-sitter-language-pack>=0.7.0",
+  # tree-sitter and tree-sitter-language-pack share a C ABI; mismatched majors
+  # produce errors like "'builtins.Parser' object has no attribute 'parse'".
+  # Pin tree-sitter to the 0.23.x series the language pack 0.7.x ships against.
+  "tree-sitter>=0.23.0,<0.24",
+  "tree-sitter-language-pack>=0.7.0,<0.8",
   "jinja2>=3.1.4",
   "pygments>=2.18.0",
   "aiohttp>=3.10.0",

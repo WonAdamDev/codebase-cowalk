@@ -11,6 +11,7 @@ into smaller named sub-chunks at runtime.
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -377,13 +378,29 @@ def chunk_file(path: Path, sequence_start: int = 0, code_override: str | None = 
 
     try:
         parser = get_parser(language)
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(
+            f"[cowalk] get_parser({language!r}) failed for {path}: "
+            f"{type(exc).__name__}: {exc}; falling back to whole-file chunk\n"
+        )
         chunks.append(_whole_file_chunk(path, text, language, seq))
         return chunks, seq + 1
 
-    source = text.encode("utf-8", errors="replace")
-    tree = parser.parse(source)
-    root = tree.root_node
+    # Wrap the actual parse — a tree-sitter / language-pack ABI mismatch surfaces
+    # here as e.g. "'builtins.Parser' object has no attribute 'parse'". Catch
+    # broadly so a single broken file (or broken binding) only loses chunking
+    # for that file rather than crashing the whole propose_scope call.
+    try:
+        source = text.encode("utf-8", errors="replace")
+        tree = parser.parse(source)
+        root = tree.root_node
+    except Exception as exc:
+        sys.stderr.write(
+            f"[cowalk] tree-sitter parse failed for {path} ({language}): "
+            f"{type(exc).__name__}: {exc}; falling back to whole-file chunk\n"
+        )
+        chunks.append(_whole_file_chunk(path, text, language, seq))
+        return chunks, seq + 1
     types = CHUNK_NODE_TYPES.get(language, set())
     if not types:
         chunks.append(_whole_file_chunk(path, text, language, seq))
@@ -476,13 +493,26 @@ def _whole_file_chunk(path: Path, text: str, language: str | None, seq: int) -> 
 
 
 def chunk_files(paths: Iterable[Path]) -> list[ChunkSpec]:
-    """Chunk a list of files in order, threading global sequence numbers."""
+    """Chunk a list of files in order, threading global sequence numbers.
+
+    Per-file failures (unreadable file, broken tree-sitter binding, etc.) are
+    logged and the file is skipped, so a single bad file does not kill the
+    whole scope. The caller (propose_scope / start_session) should still
+    succeed and the user gets whatever chunks were produced from the
+    healthy files.
+    """
     out: list[ChunkSpec] = []
     seq = 0
     for p in paths:
         try:
             file_chunks, seq = chunk_file(p, sequence_start=seq)
         except (OSError, UnicodeDecodeError):
+            continue
+        except Exception as exc:
+            sys.stderr.write(
+                f"[cowalk] unexpected error chunking {p}: "
+                f"{type(exc).__name__}: {exc}; skipping file\n"
+            )
             continue
         out.extend(file_chunks)
     return out
