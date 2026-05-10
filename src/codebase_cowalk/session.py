@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .chunker import ChunkSpec, chunk_files
+from .chunker import ChunkSpec, chunk_files, detect_language
 from .store import SessionStore
 
 
@@ -69,7 +69,7 @@ def ingest_scope(
     workdir: Path,
     scope: list[ScopeEntry],
 ) -> list[ChunkSpec]:
-    """Resolve scope entries to absolute paths, run the chunker, persist chunks."""
+    """Resolve scope entries to absolute paths, snapshot each file, run the chunker, persist chunks."""
     paths: list[Path] = []
     diff_index: dict[str, ScopeEntry] = {}
     for e in scope:
@@ -79,6 +79,16 @@ def ingest_scope(
         if p.exists() and p.is_file():
             paths.append(p)
             diff_index[str(p)] = e
+
+    # Snapshot each file's full source up front. The UI shows whole-file context
+    # and highlights the selected chunk's range — without these snapshots, the
+    # reviewer can only see chunk-local code.
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        store.add_file_snapshot(str(p), text, language=detect_language(p))
 
     chunks = chunk_files(paths)
 

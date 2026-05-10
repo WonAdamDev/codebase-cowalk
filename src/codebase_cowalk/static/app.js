@@ -18,6 +18,7 @@
     commentsByChunk: initial.comments_by_chunk || {},
     progress: initial.progress || { total: 0, analyzed: 0, reviewed: 0 },
     chunkCodeById: initial.chunk_code_by_id || {},
+    fileSourcesByPath: initial.file_sources_by_path || {},
     activeChunkId: null,
     filter: { text: "", status: "" },
   };
@@ -163,8 +164,64 @@
     return c.review_status === st;
   }
 
-  function renderTree() {
-    tree.innerHTML = "";
+  // Conventional layer order for onboard mode. Unknown layers are appended
+  // after these in alphabetical order.
+  const LAYER_ORDER = ["foundations", "core", "systems", "game", "wiring"];
+  function layerRank(name) {
+    const i = LAYER_ORDER.indexOf((name || "").toLowerCase());
+    return i === -1 ? 1000 + (name || "zzz").charCodeAt(0) / 1000 : i;
+  }
+
+  function currentMode() {
+    return (state.session && state.session.mode) || "review";
+  }
+
+  // List of chunks the user is meant to walk through in order, used for
+  // "previous/next lesson" navigation in onboard mode. Chunks without a
+  // lesson_order are excluded from this list (so the buttons skip over them).
+  function lessonChain() {
+    return state.chunks
+      .filter((c) => c.status !== "split" && Number.isFinite(c.lesson_order))
+      .sort((a, b) => a.lesson_order - b.lesson_order);
+  }
+
+  function buildChunkNode(c) {
+    const el = document.createElement("div");
+    el.className = "tree-chunk";
+    if (c.status !== "analyzed") el.classList.add("unanalyzed");
+    if (c.id === state.activeChunkId) el.classList.add("active");
+    el.dataset.chunk = c.id;
+
+    const stIcon = document.createElement("span");
+    stIcon.className = "tree-chunk-status " + (c.review_status || "");
+    stIcon.textContent =
+      c.review_status === "ok" ? "✓" :
+      c.review_status === "suspicious" ? "🚩" :
+      c.review_status === "unknown" ? "❓" : "·";
+    el.appendChild(stIcon);
+
+    if (currentMode() === "onboard" && Number.isFinite(c.lesson_order)) {
+      const lesson = document.createElement("span");
+      lesson.className = "tree-chunk-lesson";
+      lesson.textContent = c.lesson_order;
+      el.appendChild(lesson);
+    }
+
+    const name = document.createElement("span");
+    name.className = "tree-chunk-name";
+    name.textContent = c.symbol_path || `lines ${c.line_start}-${c.line_end}`;
+    el.appendChild(name);
+
+    const meta = document.createElement("span");
+    meta.className = "tree-chunk-meta";
+    meta.textContent = `${c.line_end - c.line_start + 1}L`;
+    el.appendChild(meta);
+
+    el.addEventListener("click", () => activate(c.id));
+    return el;
+  }
+
+  function renderTreeByFile() {
     const byFile = {};
     for (const c of state.chunks) {
       if (c.status === "split") continue;
@@ -182,35 +239,55 @@
       head.textContent = shortenPath(f);
       head.title = f;
       tree.appendChild(head);
-      for (const c of byFile[f]) {
-        const el = document.createElement("div");
-        el.className = "tree-chunk";
-        if (c.status !== "analyzed") el.classList.add("unanalyzed");
-        if (c.id === state.activeChunkId) el.classList.add("active");
-        el.dataset.chunk = c.id;
+      for (const c of byFile[f]) tree.appendChild(buildChunkNode(c));
+    }
+  }
 
-        const stIcon = document.createElement("span");
-        stIcon.className = "tree-chunk-status " + (c.review_status || "");
-        stIcon.textContent =
-          c.review_status === "ok" ? "✓" :
-          c.review_status === "suspicious" ? "🚩" :
-          c.review_status === "unknown" ? "❓" : "·";
-        el.appendChild(stIcon);
-
-        const name = document.createElement("span");
-        name.className = "tree-chunk-name";
-        name.textContent = c.symbol_path || `lines ${c.line_start}-${c.line_end}`;
-        el.appendChild(name);
-
-        const meta = document.createElement("span");
-        meta.className = "tree-chunk-meta";
-        meta.textContent = `${c.line_end - c.line_start + 1}L`;
-        el.appendChild(meta);
-
-        el.addEventListener("click", () => activate(c.id));
-        tree.appendChild(el);
+  function renderTreeByLayer() {
+    const byLayer = {};
+    for (const c of state.chunks) {
+      if (c.status === "split") continue;
+      if (!chunkMatchesFilter(c)) continue;
+      const key = c.layer || "(unassigned)";
+      (byLayer[key] ||= []).push(c);
+    }
+    const layers = Object.keys(byLayer).sort((a, b) => layerRank(a) - layerRank(b));
+    if (!layers.length) {
+      tree.innerHTML = '<div class="empty">no chunks match the filter</div>';
+      return;
+    }
+    for (const layer of layers) {
+      const head = document.createElement("div");
+      head.className = "tree-layer";
+      head.textContent = layer;
+      tree.appendChild(head);
+      const lessonsFirst = byLayer[layer].slice().sort((a, b) => {
+        const ao = Number.isFinite(a.lesson_order) ? a.lesson_order : Infinity;
+        const bo = Number.isFinite(b.lesson_order) ? b.lesson_order : Infinity;
+        if (ao !== bo) return ao - bo;
+        return a.sequence - b.sequence;
+      });
+      // Sub-group by file under each layer so the user still sees structure.
+      let lastFile = null;
+      for (const c of lessonsFirst) {
+        if (c.file_path !== lastFile) {
+          const sub = document.createElement("div");
+          sub.className = "tree-file tree-file-sub";
+          sub.textContent = shortenPath(c.file_path);
+          sub.title = c.file_path;
+          tree.appendChild(sub);
+          lastFile = c.file_path;
+        }
+        tree.appendChild(buildChunkNode(c));
       }
     }
+  }
+
+  function renderTree() {
+    tree.innerHTML = "";
+    if (currentMode() === "onboard") renderTreeByLayer();
+    else renderTreeByFile();
+    renderLessonNav();
   }
 
   function shortenPath(p) {
@@ -221,16 +298,59 @@
 
   // ---- center code ----------------------------------------------------
 
+  // Render the *whole file* the chunk lives in, then dim everything outside
+  // the chunk's [line_start..line_end] so the reviewer can see surrounding
+  // context (imports, sibling functions) without losing focus on the chunk.
+  // If a file snapshot is unavailable (legacy session, manual chunk for an
+  // out-of-scope file), fall back to rendering only the chunk snippet.
   function renderCode(c) {
-    const code = state.chunkCodeById[c.id] || "";
-    const lines = code.split("\n");
     chunkCode.innerHTML = "";
+    const fileSrc = state.fileSourcesByPath[c.file_path];
     const added = new Set(c.diff_added_lines || []);
     const removed = new Set(c.diff_removed_lines || []);
+
+    if (fileSrc && typeof fileSrc.content === "string") {
+      const lines = fileSrc.content.split("\n");
+      // trailing empty string from a final newline — drop it so we don't render a phantom line
+      if (lines.length && lines[lines.length - 1] === "") lines.pop();
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < lines.length; i++) {
+        const lineNum = i + 1;
+        const span = document.createElement("span");
+        span.className = "code-line";
+        span.dataset.ln = lineNum;
+        if (lineNum >= c.line_start && lineNum <= c.line_end) {
+          span.classList.add("in-chunk");
+          if (lineNum === c.line_start) span.classList.add("chunk-start");
+          if (lineNum === c.line_end) span.classList.add("chunk-end");
+        } else {
+          span.classList.add("out-of-chunk");
+        }
+        if (added.has(lineNum)) span.classList.add("added");
+        if (removed.has(lineNum)) span.classList.add("removed");
+        span.textContent = lines[i] + "\n";
+        frag.appendChild(span);
+      }
+      chunkCode.appendChild(frag);
+      // Scroll the first line of the chunk into view, near the top of the pane.
+      const target = chunkCode.querySelector(`.code-line[data-ln="${c.line_start}"]`);
+      if (target) {
+        // requestAnimationFrame so layout has happened before scrollIntoView measures
+        requestAnimationFrame(() =>
+          target.scrollIntoView({ behavior: "auto", block: "start" })
+        );
+      }
+      return;
+    }
+
+    // Fallback: chunk-only view (legacy / out-of-scope file).
+    const code = state.chunkCodeById[c.id] || "";
+    const lines = code.split("\n");
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
     for (let i = 0; i < lines.length; i++) {
       const lineNum = c.line_start + i;
       const span = document.createElement("span");
-      span.className = "code-line";
+      span.className = "code-line in-chunk";
       span.dataset.ln = lineNum;
       if (added.has(lineNum)) span.classList.add("added");
       if (removed.has(lineNum)) span.classList.add("removed");
@@ -334,11 +454,18 @@
     document.querySelectorAll(".tree-chunk").forEach((e) => {
       e.classList.toggle("active", e.dataset.chunk === chunkId);
     });
+    // Make sure the active chunk is visible in the left tree (it can be off-screen
+    // if the user just stepped a lesson via the keyboard / next button).
+    const treeNode = document.querySelector(`.tree-chunk[data-chunk="${chunkId}"]`);
+    if (treeNode && typeof treeNode.scrollIntoView === "function") {
+      treeNode.scrollIntoView({ block: "nearest" });
+    }
     renderHeader(c);
     renderCode(c);
     renderBlocks(c);
     renderComments(c);
     renderStatusToggle(c);
+    renderLessonNav();
   }
 
   // ---- progress -------------------------------------------------------
@@ -350,6 +477,56 @@
     barReviewed.style.width = `${(p.reviewed / total) * 100}%`;
     lblAnalyzed.textContent = `${p.analyzed}/${p.total}`;
     lblReviewed.textContent = `${p.reviewed}/${p.total}`;
+  }
+
+  // ---- onboard lesson navigation -------------------------------------
+
+  function renderLessonNav() {
+    let nav = document.getElementById("lesson-nav");
+    if (currentMode() !== "onboard") {
+      if (nav) nav.remove();
+      document.body.classList.remove("mode-onboard");
+      return;
+    }
+    document.body.classList.add("mode-onboard");
+    const chain = lessonChain();
+    if (!chain.length) {
+      if (nav) nav.remove();
+      return;
+    }
+    if (!nav) {
+      nav = document.createElement("div");
+      nav.id = "lesson-nav";
+      nav.innerHTML = `
+        <button id="lesson-prev" class="action-btn" title="Previous lesson">◀</button>
+        <span id="lesson-label">Lesson —</span>
+        <button id="lesson-next" class="action-btn" title="Next lesson">▶</button>
+      `;
+      const actions = document.getElementById("chunk-actions");
+      actions.parentNode.insertBefore(nav, actions);
+      document.getElementById("lesson-prev").addEventListener("click", () => stepLesson(-1));
+      document.getElementById("lesson-next").addEventListener("click", () => stepLesson(+1));
+    }
+    const label = document.getElementById("lesson-label");
+    const idx = chain.findIndex((c) => c.id === state.activeChunkId);
+    if (idx === -1) {
+      label.textContent = `Lesson — / ${chain.length}`;
+    } else {
+      const lo = chain[idx].lesson_order;
+      label.textContent = `Lesson ${idx + 1} / ${chain.length} (#${lo})`;
+    }
+    document.getElementById("lesson-prev").disabled = idx <= 0;
+    document.getElementById("lesson-next").disabled = idx === -1 ? chain.length === 0 : idx >= chain.length - 1;
+  }
+
+  function stepLesson(delta) {
+    const chain = lessonChain();
+    if (!chain.length) return;
+    let idx = chain.findIndex((c) => c.id === state.activeChunkId);
+    if (idx === -1) idx = delta > 0 ? -1 : chain.length;
+    const next = idx + delta;
+    if (next < 0 || next >= chain.length) return;
+    activate(chain[next].id);
   }
 
   // ---- AJAX ----------------------------------------------------------
@@ -407,6 +584,20 @@
         renderComments(state.chunks.find((c) => c.id === data.chunk_id));
       }
     });
+    es.addEventListener("chunk_meta", (e) => {
+      const data = JSON.parse(e.data);
+      const c = state.chunks.find((c) => c.id === data.id);
+      if (!c) return;
+      if (data.lesson_order !== undefined) c.lesson_order = data.lesson_order;
+      if (data.layer !== undefined) c.layer = data.layer;
+      renderTree();
+    });
+    es.addEventListener("session_mode", (e) => {
+      const data = JSON.parse(e.data);
+      state.session = state.session || {};
+      state.session.mode = data.mode;
+      renderTree();
+    });
     es.onerror = () => {
       // browser auto-reconnects; nothing to do
     };
@@ -453,6 +644,17 @@
 
   renderTree();
   renderProgress();
-  if (state.chunks.length) activate(state.chunks[0].id);
+  // In onboard mode, start at lesson 1 if Claude has populated lesson orders;
+  // otherwise fall back to the first chunk like review mode.
+  let bootChunkId = null;
+  if (state.chunks.length) {
+    if (currentMode() === "onboard") {
+      const chain = lessonChain();
+      bootChunkId = (chain[0] || state.chunks[0]).id;
+    } else {
+      bootChunkId = state.chunks[0].id;
+    }
+  }
+  if (bootChunkId) activate(bootChunkId);
   connectSSE();
 })();

@@ -66,6 +66,7 @@ def build_state(
     comments_by_chunk: dict[str, list[dict[str, Any]]],
     progress: dict[str, int],
     chunk_code_by_id: dict[str, str],
+    file_sources_by_path: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON state object that the page consumes (both live and static)."""
     return {
@@ -75,4 +76,5 @@ def build_state(
         "comments_by_chunk": comments_by_chunk,
         "progress": progress,
         "chunk_code_by_id": chunk_code_by_id,
+        "file_sources_by_path": file_sources_by_path or {},
     }

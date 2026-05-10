@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS session (
     vcs TEXT,                           -- "git" | "p4" | null
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    workdir TEXT NOT NULL               -- absolute path of the analyzed codebase
+    workdir TEXT NOT NULL,              -- absolute path of the analyzed codebase
+    mode TEXT NOT NULL DEFAULT 'review' -- review | onboard
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -43,12 +44,22 @@ CREATE TABLE IF NOT EXISTS chunks (
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | analyzed | split
     review_status TEXT,                 -- ok | suspicious | unknown | null
     sequence INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    lesson_order INTEGER,               -- onboard mode: learning order across the whole session
+    layer TEXT                          -- onboard mode: e.g. "foundations" / "core" / "systems" / "wiring"
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_seq ON chunks(sequence);
 CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
+
+CREATE TABLE IF NOT EXISTS file_snapshots (
+    file_path TEXT PRIMARY KEY,         -- absolute path, matches chunks.file_path
+    content TEXT NOT NULL,              -- the full file source at session start
+    line_count INTEGER NOT NULL,
+    language TEXT,
+    captured_at REAL NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +108,28 @@ class SessionStore:
     def _init_schema(self) -> None:
         with self._conn() as cx:
             cx.executescript(SCHEMA)
+            self._migrate(cx)
+
+    @staticmethod
+    def _migrate(cx: sqlite3.Connection) -> None:
+        """Additive migrations for DBs created before a column existed.
+
+        SQLite's CREATE TABLE IF NOT EXISTS skips the body entirely if the table
+        is present, so columns added later need explicit ALTER TABLE here.
+        """
+
+        def has_col(table: str, col: str) -> bool:
+            return any(r["name"] == col for r in cx.execute(f"PRAGMA table_info({table})").fetchall())
+
+        if not has_col("session", "mode"):
+            cx.execute("ALTER TABLE session ADD COLUMN mode TEXT NOT NULL DEFAULT 'review'")
+        if not has_col("chunks", "lesson_order"):
+            cx.execute("ALTER TABLE chunks ADD COLUMN lesson_order INTEGER")
+        if not has_col("chunks", "layer"):
+            cx.execute("ALTER TABLE chunks ADD COLUMN layer TEXT")
+        # Indexes that reference columns added above must be created after the
+        # ALTERs, otherwise sqlite errors on old DBs that pre-date those columns.
+        cx.execute("CREATE INDEX IF NOT EXISTS idx_chunks_lesson ON chunks(lesson_order)")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -119,13 +152,16 @@ class SessionStore:
         diff_mode: bool,
         vcs: str | None,
         scope_summary: dict[str, Any] | None,
+        mode: str = "review",
     ) -> None:
+        if mode not in ("review", "onboard"):
+            raise ValueError(f"invalid session mode: {mode!r}")
         now = time.time()
         with self._conn() as cx:
             cx.execute(
                 "INSERT OR REPLACE INTO session "
-                "(id, slug, request, scope_summary, diff_mode, vcs, created_at, updated_at, workdir) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, slug, request, scope_summary, diff_mode, vcs, created_at, updated_at, workdir, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self.session_id,
                     slug,
@@ -136,7 +172,17 @@ class SessionStore:
                     now,
                     now,
                     workdir,
+                    mode,
                 ),
+            )
+
+    def set_session_mode(self, mode: str) -> None:
+        if mode not in ("review", "onboard"):
+            raise ValueError(f"invalid session mode: {mode!r}")
+        with self._conn() as cx:
+            cx.execute(
+                "UPDATE session SET mode = ?, updated_at = ? WHERE id = ?",
+                (mode, time.time(), self.session_id),
             )
 
     def get_session(self) -> dict[str, Any] | None:
@@ -198,10 +244,31 @@ class SessionStore:
         with self._conn() as cx:
             rows = cx.execute(
                 "SELECT id, parent_id, file_path, symbol_path, language, line_start, line_end, "
-                "       status, review_status, sequence "
+                "       status, review_status, sequence, lesson_order, layer "
                 "FROM chunks ORDER BY sequence ASC"
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def set_chunk_meta(
+        self,
+        chunk_id: str,
+        lesson_order: int | None = None,
+        layer: str | None = None,
+    ) -> None:
+        """Update onboard-mode chunk metadata. Only fields explicitly passed are touched."""
+        sets: list[str] = []
+        args: list[Any] = []
+        if lesson_order is not None:
+            sets.append("lesson_order = ?")
+            args.append(int(lesson_order))
+        if layer is not None:
+            sets.append("layer = ?")
+            args.append(str(layer))
+        if not sets:
+            return
+        args.append(chunk_id)
+        with self._conn() as cx:
+            cx.execute(f"UPDATE chunks SET {', '.join(sets)} WHERE id = ?", args)
 
     def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
         with self._conn() as cx:
@@ -265,6 +332,51 @@ class SessionStore:
                 (chunk_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # file snapshots --------------------------------------------------------
+
+    def add_file_snapshot(
+        self,
+        file_path: str,
+        content: str,
+        language: str | None = None,
+    ) -> None:
+        """Persist the full source of a file at session-start time.
+
+        Idempotent: re-saving the same path overwrites the prior snapshot. The UI
+        reads from here so the reviewer always sees the code as it was when the
+        codewalk began, even if the working tree changes later.
+        """
+        with self._conn() as cx:
+            cx.execute(
+                "INSERT OR REPLACE INTO file_snapshots "
+                "(file_path, content, line_count, language, captured_at) VALUES (?, ?, ?, ?, ?)",
+                (file_path, content, content.count("\n") + 1, language, time.time()),
+            )
+
+    def get_file_snapshot(self, file_path: str) -> dict[str, Any] | None:
+        with self._conn() as cx:
+            row = cx.execute(
+                "SELECT file_path, content, line_count, language, captured_at "
+                "FROM file_snapshots WHERE file_path = ?",
+                (file_path,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_file_snapshots(self) -> list[dict[str, Any]]:
+        """All snapshots without their content (cheap, for indexing). Use get_file_snapshot for content."""
+        with self._conn() as cx:
+            rows = cx.execute(
+                "SELECT file_path, line_count, language, captured_at FROM file_snapshots"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def has_file_snapshot(self, file_path: str) -> bool:
+        with self._conn() as cx:
+            row = cx.execute(
+                "SELECT 1 FROM file_snapshots WHERE file_path = ? LIMIT 1", (file_path,)
+            ).fetchone()
+            return row is not None
 
     # comments --------------------------------------------------------------
 

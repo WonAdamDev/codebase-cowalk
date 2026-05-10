@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .chunker import ChunkSpec, chunk_files, hash_code, split_chunk_by_ranges
+from .chunker import ChunkSpec, chunk_files, detect_language, hash_code, split_chunk_by_ranges
 from .export import (
     cleanup_view,
     export_session as do_export,
@@ -119,9 +119,18 @@ def start_session(
     diff_mode: bool = False,
     vcs: str | None = None,
     resume: str | None = None,
+    mode: str = "review",
 ) -> dict[str, Any]:
     """Start a new codewalk session (or resume an existing one by slug or id) and
     spin up an HTTP server on a free port. Returns the URL to give to the user.
+
+    `mode` is one of:
+      - "review"  (default): chunk-by-chunk audit of LLM-written code. Reviewer
+        marks ✓ / 🚩 / ❓ and leaves notes. Left tree groups chunks by file.
+      - "onboard": curriculum-style learning of an unfamiliar codebase. Claude
+        assigns each chunk a `layer` ("foundations" / "core" / ...) and a
+        `lesson_order` so the user is guided through a sensible reading order.
+        Use `set_chunk_meta` to populate those after the chunks land.
 
     To resume, pass `resume=<slug or session_id>` and omit `scope`.
     """
@@ -152,6 +161,7 @@ def start_session(
             diff_mode=diff_mode,
             vcs=vcs,
             scope_summary=scope_summary(chunks),
+            mode=mode,
         )
 
     # bring up HTTP server
@@ -184,6 +194,30 @@ def get_chunk(session_id: str, chunk_id: str) -> dict[str, Any] | None:
     """Fetch a chunk's full record including its source code snapshot. Use this
     to read code before pushing explanation blocks for it."""
     return _store(session_id).get_chunk(chunk_id)
+
+
+@mcp.tool()
+def get_file_source(session_id: str, file_path: str) -> dict[str, Any] | None:
+    """Return the full snapshot of a file captured at session start.
+
+    Use this when you want the surrounding context for a chunk — e.g. to
+    understand how a function is called, or to read file-level imports/types
+    that a chunk depends on. The UI uses the same snapshots to render the
+    whole-file code pane with the selected chunk highlighted, so what you read
+    here is exactly what the user is seeing.
+
+    `file_path` should match the `file_path` field of a chunk (absolute path).
+    Returns None if the path was not part of the scope.
+    """
+    return _store(session_id).get_file_snapshot(file_path)
+
+
+@mcp.tool()
+def list_file_snapshots(session_id: str) -> list[dict[str, Any]]:
+    """List all files captured for this session (path, line_count, language).
+
+    Cheap — does not return file content. Use get_file_source to read a file."""
+    return _store(session_id).list_file_snapshots()
 
 
 @mcp.tool()
@@ -312,6 +346,59 @@ def set_chunk_analyzed(session_id: str, chunk_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def set_chunk_meta(
+    session_id: str,
+    chunk_id: str,
+    lesson_order: int | None = None,
+    layer: str | None = None,
+) -> dict[str, Any]:
+    """Attach onboard-mode metadata to a chunk: a learning order index and a
+    coarse layer label.
+
+    Use this in `mode="onboard"` sessions after you have decided how to sequence
+    the codebase for the learner:
+
+    - `lesson_order` (int, 1-based): the global reading order across the whole
+      session. Lower numbers come first. Don't worry about gaps — the UI just
+      sorts by this field within a layer.
+    - `layer` (str): a coarse grouping the UI uses for the left-pane
+      hierarchy. Conventional values, in default sort order: "foundations",
+      "core", "systems", "game", "wiring". You can use other strings; the UI
+      will fall back to alphabetical for layers it doesn't know.
+
+    Both fields are optional — passing only one leaves the other untouched.
+    Calling this in a review-mode session is a no-op for the UI but the values
+    are still stored.
+    """
+    store = _store(session_id)
+    store.set_chunk_meta(chunk_id, lesson_order=lesson_order, layer=layer)
+    store.touch()
+    chunk = store.get_chunk(chunk_id)
+    if chunk:
+        _publish(session_id, "chunk_meta", {
+            "id": chunk_id,
+            "lesson_order": chunk.get("lesson_order"),
+            "layer": chunk.get("layer"),
+        })
+    return {"ok": True, "lesson_order": lesson_order, "layer": layer}
+
+
+@mcp.tool()
+def set_session_mode(session_id: str, mode: str) -> dict[str, Any]:
+    """Switch a session's mode between 'review' and 'onboard' mid-walk.
+
+    Useful when the user starts a review and partway through asks "actually,
+    can you walk me through this so I can learn it?" — flip the mode, populate
+    `lesson_order`/`layer` via `set_chunk_meta`, and the page rerenders the
+    left tree as a curriculum.
+    """
+    store = _store(session_id)
+    store.set_session_mode(mode)
+    _publish(session_id, "session_mode", {"mode": mode})
+    return {"ok": True, "mode": mode}
+
+
+@mcp.tool()
 def add_chunk(
     session_id: str,
     file_path: str,
@@ -328,13 +415,29 @@ def add_chunk(
     existing = store.list_chunks()
     seq = max((c["sequence"] for c in existing), default=-1) + 1
     chunk_id = f"c-{seq:04d}"
+    full_text: str | None = None
     if code is None:
         try:
-            text = Path(file_path).read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines(keepends=True)
+            full_text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            lines = full_text.splitlines(keepends=True)
             code = "".join(lines[line_start - 1 : line_end])
         except OSError as exc:
             raise ValueError(f"cannot read file {file_path}: {exc}")
+    # Capture a full-file snapshot the first time we see this path so the UI can
+    # render whole-file context. We only re-read if we did not already pull the
+    # full text above.
+    if not store.has_file_snapshot(file_path):
+        if full_text is None:
+            try:
+                full_text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                full_text = None
+        if full_text is not None:
+            store.add_file_snapshot(
+                file_path,
+                full_text,
+                language=language or detect_language(Path(file_path)),
+            )
     store.add_chunk(
         chunk_id=chunk_id,
         file_path=file_path,

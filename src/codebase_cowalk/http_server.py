@@ -114,7 +114,26 @@ class HttpServer:
                 "diff_removed_lines": c.get("diff_removed_lines"),
                 "has_diff": bool(c.get("diff_added_lines") or c.get("diff_removed_lines")),
                 "sequence": c["sequence"],
+                "lesson_order": c.get("lesson_order"),
+                "layer": c.get("layer"),
             })
+        # File-level snapshots for whole-file context. The UI shows the entire
+        # file in the center pane and highlights the active chunk's line range.
+        # Chunks whose file_path has no snapshot fall back to chunk_code_by_id.
+        file_sources_by_path: dict[str, dict[str, Any]] = {}
+        seen: set[str] = set()
+        for c in chunks_full:
+            fp = c["file_path"]
+            if fp in seen:
+                continue
+            seen.add(fp)
+            snap = self.store.get_file_snapshot(fp)
+            if snap:
+                file_sources_by_path[fp] = {
+                    "content": snap["content"],
+                    "line_count": snap["line_count"],
+                    "language": snap.get("language"),
+                }
         return build_state(
             session=session,
             chunks=chunk_payload,
@@ -122,6 +141,7 @@ class HttpServer:
             comments_by_chunk=comments_by_chunk,
             progress=self.store.progress(),
             chunk_code_by_id=chunk_code_by_id,
+            file_sources_by_path=file_sources_by_path,
         )
 
     # handlers --------------------------------------------------------------
